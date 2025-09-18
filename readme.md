@@ -187,3 +187,41 @@ go run main.go
 # Accès depuis une autre machine
 http://IP_DE_LA_VM:8080
 ```
+
+## Windows configuration
+
+### 1. Installation de Go
+Télécharger et installer Go depuis le site officiel :  
+[https://go.dev/dl/](https://go.dev/dl/)
+
+### 2. Compilateur C
+Installer un compilateur C, requis par `kbinani/screenshot` :
+- Option 1 : [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)  
+- Option 2 : [MinGW-w64](http://mingw-w64.org/doku.php)
+
+### 3. Dépendances natives
+- **PowerShell** : déjà inclus dans Windows, utilisé pour le contrôle souris/clavier et le presse-papiers.  
+- **NirCmd** (optionnel) : peut être installé pour compléter certaines actions souris si PowerShell échoue.  
+  Téléchargement : [https://www.nirsoft.net/utils/nircmd.html](https://www.nirsoft.net/utils/nircmd.html)
+
+---
+
+## macOS configuration
+
+### 1. Installation de Go
+```bash
+brew install go
+```
+Ou télécharger depuis le site officiel : [https://go.dev/dl/](https://go.dev/dl/)
+
+### 2. Compilateur C
+Installer les outils de développement Apple :
+```bash
+xcode-select --install
+```
+
+### 3. Dépendances natives
+- **osascript** : inclus dans macOS, utilisé pour le contrôle souris/clavier.  
+- **pbcopy / pbpaste** : inclus dans macOS, utilisés pour la gestion du presse-papiers.  
+
+Aucune installation supplémentaire n’est nécessaire.
