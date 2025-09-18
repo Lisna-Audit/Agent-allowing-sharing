@@ -1,6 +1,6 @@
 # VM Desktop Streamer
 
-Solution de partage d'écran en temps réel via navigateur web, développée en Go avec WebSocket.
+Solution de partage d'écran et de contrôle en temps réel via navigateur web, développée en Go avec WebSocket.
 
 ## Fonctionnalités
 
@@ -10,6 +10,11 @@ Solution de partage d'écran en temps réel via navigateur web, développée en 
 - Qualité d'image adaptative selon le FPS choisi
 - Contrôle FPS dynamique en temps réel
 - Vue responsive qui s'adapte automatiquement à la taille d'écran
+- Contrôle souris et clavier à distance
+- Synchronisation presse-papiers (VM ↔ navigateur)
+- Défilement molette (scroll)
+- Gestion connect / disconnect côté client
+- Plein écran interactif via double-clic ou touche F/Escape
 
 ## Installation
 
@@ -51,16 +56,24 @@ go run main.go
 1. Lancer l'application : `go run main.go`
 2. Ouvrir un navigateur à l'adresse : `http://localhost:8080`
 3. Cliquer sur "Connect" pour démarrer le streaming
-4. Utiliser les contrôles pour ajuster le FPS et changer d'écran
+4. Cliquer sur "Enable Control" pour activer le contrôle souris/clavier
+5. Utiliser les contrôles pour ajuster le FPS et changer d'écran
+6. "Sync Clipboard" permet de synchroniser le presse-papiers manuellement
 
 ### Contrôles disponibles
 
 - **Boutons FPS** : 5, 10, 15, 30, 60, 120 FPS
 - **Sélection d'écran** : All (tous), 1, 2, 3 (écrans individuels)
 - **Double-clic** : Basculer en plein écran
+- **Molette** : Scroll vertical dans la VM
 - **Touches clavier** :
   - `F` ou `Escape` : Plein écran
-  - `1-4` : Sélection d'écran
+  - `1-4` avec Ctrl : Sélection d'écran
+  - `Ctrl+C / Ctrl+V` : Copier-coller avec synchro automatique du presse-papiers
+- **Souris** :
+  - Clic gauche/droit/milieu
+  - Glisser-déposer (drag)
+  - Déplacement fluide (throttling 60Hz)
 
 ### Personnalisation
 
@@ -75,13 +88,17 @@ La solution utilise une capture d'écran native optimisée qui permet :
 - Temps de capture : 5-15ms (vs 500ms avec PowerShell classique)
 - FPS réel proche du FPS configuré
 - Diffusion binaire JPEG sans encodage base64
+- Qualité JPEG adaptative (réduite automatiquement quand FPS élevé pour garder la fluidité)
+- Affichage via `<canvas>` et `createImageBitmap` pour réduire la latence
 
 ## Architecture technique
 
 - **Backend** : Go avec capture native via `kbinani/screenshot`
-- **Communication** : WebSocket avec transmission binaire
-- **Frontend** : HTML5/JavaScript avec gestion optimisée des blobs
+- **Communication** : WebSocket avec transmission binaire + events JSON
+- **Frontend** : HTML5/JavaScript avec canvas, gestion des événements souris/clavier
 - **Compression** : JPEG avec qualité adaptative selon le FPS
+- **Clipboard** : gestion VM ↔ navigateur via WebSocket
+- **Sécurité connexion** : gestion manuelle connect/disconnect côté client
 
 ## Sécurité
 
@@ -114,7 +131,7 @@ sudo systemctl restart gdm3
 ### 3. Au login : Choisir "GNOME on Xorg"
 
 1. Cliquer sur l'icône engrenage à côté du bouton de connexion
-3. Sélectionner "GNOME on Xorg" au lieu de "GNOME"
+2. Sélectionner "GNOME on Xorg" au lieu de "GNOME"
 3. Se connecter normalement
 
 ### 4. Dépendances Go et compilation
@@ -133,7 +150,7 @@ sudo apt install libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxfix
 ### 5. Outils de contrôle
 ```bash
 # xdotool pour contrôle souris/clavier
-sudo apt install xdotool -y
+sudo apt install xdotool xclip -y
 
 # Outils de capture d'écran (alternatives)
 sudo apt install scrot imagemagick maim -y

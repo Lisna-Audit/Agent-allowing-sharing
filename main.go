@@ -30,6 +30,11 @@ type ControlEvent struct {
 	Data interface{} `json:"data"`
 }
 
+type ClipboardEvent struct {
+	Text   string `json:"text"`
+	Action string `json:"action"` // "get", "set"
+}
+
 type ScreenStreamer struct {
 	clients       map[*websocket.Conn]bool
 	currentScreen int
@@ -71,51 +76,43 @@ func simulateMouseClick(x, y int, button string, action string) error {
 }
 
 func simulateMouseWindows(x, y int, button string, action string) error {
+	log.Printf("Mouse Windows: x=%d, y=%d, button=%s, action=%s", x, y, button, action)
+
 	var cmd *exec.Cmd
 
-	if action == "move" {
+	if action == "move" || action == "drag" {
 		psScript := fmt.Sprintf(`
 		Add-Type -AssemblyName System.Windows.Forms
 		[System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(%d, %d)
 		`, x, y)
-		cmd = exec.Command("powershell", "-WindowStyle", "Hidden", "-Command", psScript)
+		cmd = exec.Command("powershell", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-Command", psScript)
 	} else if action == "down" || action == "up" {
-		buttonCode := "0x0002"
-		if button == "right" {
-			buttonCode = "0x0008"
-		}
-		if action == "up" {
-			if button == "left" {
-				buttonCode = "0x0004"
-			} else if button == "right" {
-				buttonCode = "0x0010"
-			}
-		}
-
 		psScript := fmt.Sprintf(`
 		Add-Type -AssemblyName System.Windows.Forms
+		Add-Type -AssemblyName System.Drawing
 		[System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(%d, %d)
-		Add-Type @'
-		using System;
-		using System.Runtime.InteropServices;
-		public class Win32 {
-			[DllImport("user32.dll")]
-			public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
-		}
-		'@
-		[Win32]::mouse_event(%s, %d, %d, 0, 0)
-		`, x, y, buttonCode, x, y)
-		cmd = exec.Command("powershell", "-WindowStyle", "Hidden", "-Command", psScript)
+		`, x, y)
+		cmd = exec.Command("powershell", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-Command", psScript)
 	}
 
 	if cmd != nil {
-		return cmd.Run()
+		err := cmd.Run()
+		if err != nil {
+			log.Printf("PowerShell error: %v", err)
+			if _, nircmdErr := exec.LookPath("nircmd"); nircmdErr == nil {
+				if action == "move" || action == "drag" {
+					altCmd := exec.Command("nircmd", "setcursor", strconv.Itoa(x), strconv.Itoa(y))
+					return altCmd.Run()
+				}
+			}
+			return fmt.Errorf("mouse control failed - try running as administrator")
+		}
 	}
 	return nil
 }
 
 func simulateMouseLinux(x, y int, button string, action string) error {
-	if action == "move" {
+	if action == "move" || action == "drag" {
 		cmd := exec.Command("xdotool", "mousemove", strconv.Itoa(x), strconv.Itoa(y))
 		return cmd.Run()
 	} else if action == "down" {
@@ -136,12 +133,24 @@ func simulateMouseLinux(x, y int, button string, action string) error {
 		}
 		cmd := exec.Command("xdotool", "mouseup", buttonNum)
 		return cmd.Run()
+	} else if strings.HasPrefix(action, "scroll:") {
+		// scroll:1 = haut, scroll:-1 = bas
+		parts := strings.Split(action, ":")
+		if len(parts) == 2 {
+			if parts[1] == "1" {
+				cmd := exec.Command("xdotool", "click", "4") // scroll up
+				return cmd.Run()
+			} else if parts[1] == "-1" {
+				cmd := exec.Command("xdotool", "click", "5") // scroll down
+				return cmd.Run()
+			}
+		}
 	}
 	return nil
 }
 
 func simulateMouseMacOS(x, y int, button string, action string) error {
-	if action == "move" {
+	if action == "move" || action == "drag" {
 		script := fmt.Sprintf(`tell application "System Events" to set the mouse location to {%d, %d}`, x, y)
 		cmd := exec.Command("osascript", "-e", script)
 		return cmd.Run()
@@ -153,6 +162,17 @@ func simulateMouseMacOS(x, y int, button string, action string) error {
 		script := fmt.Sprintf(`tell application "System Events" to %s at {%d, %d}`, clickType, x, y)
 		cmd := exec.Command("osascript", "-e", script)
 		return cmd.Run()
+	} else if strings.HasPrefix(action, "scroll:") {
+		parts := strings.Split(action, ":")
+		if len(parts) == 2 {
+			direction := "up"
+			if parts[1] == "-1" {
+				direction = "down"
+			}
+			script := fmt.Sprintf(`tell application "System Events" to scroll %s`, direction)
+			cmd := exec.Command("osascript", "-e", script)
+			return cmd.Run()
+		}
 	}
 	return nil
 }
@@ -167,6 +187,44 @@ func simulateKeyboard(key string, action string, ctrl, alt, shift bool) error {
 		return simulateKeyboardMacOS(key, action, ctrl, alt, shift)
 	default:
 		return fmt.Errorf("OS non supporté: %s", runtime.GOOS)
+	}
+}
+
+func getClipboard() (string, error) {
+	switch runtime.GOOS {
+	case "linux":
+		cmd := exec.Command("xclip", "-o", "-selection", "clipboard")
+		output, err := cmd.Output()
+		return string(output), err
+	case "windows":
+		cmd := exec.Command("powershell", "-Command", "Get-Clipboard")
+		output, err := cmd.Output()
+		return strings.TrimSpace(string(output)), err
+	case "darwin":
+		cmd := exec.Command("pbpaste")
+		output, err := cmd.Output()
+		return string(output), err
+	default:
+		return "", fmt.Errorf("OS non supporté")
+	}
+}
+
+func setClipboard(text string) error {
+	switch runtime.GOOS {
+	case "linux":
+		cmd := exec.Command("xclip", "-i", "-selection", "clipboard")
+		cmd.Stdin = strings.NewReader(text)
+		return cmd.Run()
+	case "windows":
+		psScript := fmt.Sprintf(`Set-Clipboard -Value '%s'`, strings.ReplaceAll(text, "'", "''"))
+		cmd := exec.Command("powershell", "-Command", psScript)
+		return cmd.Run()
+	case "darwin":
+		cmd := exec.Command("pbcopy")
+		cmd.Stdin = strings.NewReader(text)
+		return cmd.Run()
+	default:
+		return fmt.Errorf("OS non supporté")
 	}
 }
 
@@ -203,31 +261,6 @@ func simulateKeyboardWindows(key string, action string, ctrl, alt, shift bool) e
 
 	cmd := exec.Command("powershell", "-WindowStyle", "Hidden", "-Command", psScript)
 	return cmd.Run()
-}
-
-// Ajuster les coordonnées selon l'écran sélectionné
-func adjustMouseCoordinates(screenIndex int, x, y int) (int, int) {
-	if screenIndex == -1 {
-		// Mode "tous les écrans" - pas d'ajustement nécessaire
-		return x, y
-	}
-
-	if screenIndex >= screenshot.NumActiveDisplays() {
-		// Écran invalide, retourner tel quel
-		return x, y
-	}
-
-	// Obtenir les bounds de l'écran sélectionné
-	bounds := screenshot.GetDisplayBounds(screenIndex)
-
-	// Ajuster les coordonnées avec l'offset de l'écran
-	adjustedX := bounds.Min.X + x
-	adjustedY := bounds.Min.Y + y
-
-	log.Printf("Coord adjustment: screen %d, original (%d,%d) -> adjusted (%d,%d)",
-		screenIndex, x, y, adjustedX, adjustedY)
-
-	return adjustedX, adjustedY
 }
 
 func simulateKeyboardLinux(key string, action string, ctrl, alt, shift bool) error {
@@ -343,6 +376,43 @@ func (s *ScreenStreamer) broadcastImage(img image.Image, quality int) error {
 	return nil
 }
 
+func adjustMouseCoordinates(screenIndex int, x, y int) (int, int) {
+	if screenIndex == -1 {
+		return x, y
+	}
+
+	if screenIndex >= screenshot.NumActiveDisplays() {
+		return x, y
+	}
+
+	bounds := screenshot.GetDisplayBounds(screenIndex)
+	adjustedX := bounds.Min.X + x
+	adjustedY := bounds.Min.Y + y
+
+	log.Printf("Coord adjustment: screen %d, original (%d,%d) -> adjusted (%d,%d)",
+		screenIndex, x, y, adjustedX, adjustedY)
+
+	return adjustedX, adjustedY
+}
+
+func (s *ScreenStreamer) startClipboardSync(conn *websocket.Conn) {
+	var last string
+	for {
+		text, err := getClipboard()
+		if err == nil && text != last {
+			last = text
+			response := ControlEvent{
+				Type: "clipboard",
+				Data: ClipboardEvent{Text: text, Action: "content"},
+			}
+			if data, err := json.Marshal(response); err == nil {
+				conn.WriteMessage(websocket.TextMessage, data)
+			}
+		}
+		time.Sleep(2 * time.Second)
+	}
+}
+
 func (s *ScreenStreamer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -351,7 +421,7 @@ func (s *ScreenStreamer) handleWebSocket(w http.ResponseWriter, r *http.Request)
 	}
 
 	s.addClient(conn)
-
+	go s.startClipboardSync(conn)
 	go func() {
 		defer s.removeClient(conn)
 		for {
@@ -373,8 +443,18 @@ func (s *ScreenStreamer) handleWebSocket(w http.ResponseWriter, r *http.Request)
 							button := mouseData["button"].(string)
 							action := mouseData["action"].(string)
 
-							// Ajuster les coordonnées selon l'écran sélectionné
 							adjustedX, adjustedY := adjustMouseCoordinates(s.currentScreen, x, y)
+
+							// Gestion spéciale du scroll
+							if action == "scroll" {
+								if scroll, ok := mouseData["scroll"].(float64); ok {
+									err := simulateMouseClick(adjustedX, adjustedY, "wheel", fmt.Sprintf("scroll:%d", int(scroll)))
+									if err != nil {
+										log.Printf("Erreur scroll souris: %v", err)
+									}
+								}
+								continue
+							}
 
 							err := simulateMouseClick(adjustedX, adjustedY, button, action)
 							if err != nil {
@@ -392,6 +472,30 @@ func (s *ScreenStreamer) handleWebSocket(w http.ResponseWriter, r *http.Request)
 							err := simulateKeyboard(key, action, ctrl, alt, shift)
 							if err != nil {
 								log.Printf("Erreur clavier: %v", err)
+							}
+						}
+					case "clipboard":
+						if clipData, ok := controlEvent.Data.(map[string]interface{}); ok {
+							action := clipData["action"].(string)
+							if action == "get" {
+								text, err := getClipboard()
+								if err != nil {
+									log.Printf("Erreur lecture clipboard: %v", err)
+								} else {
+									response := ControlEvent{
+										Type: "clipboard",
+										Data: ClipboardEvent{Text: text, Action: "content"},
+									}
+									if data, err := json.Marshal(response); err == nil {
+										conn.WriteMessage(websocket.TextMessage, data)
+									}
+								}
+							} else if action == "set" {
+								text := clipData["text"].(string)
+								err := setClipboard(text)
+								if err != nil {
+									log.Printf("Erreur écriture clipboard: %v", err)
+								}
 							}
 						}
 					}
@@ -457,10 +561,12 @@ func (s *ScreenStreamer) startStreaming() {
 			captureTime := time.Since(frameStart)
 
 			quality := 70
-			if currentFPS >= 60 {
-				quality = 45
+			if currentFPS >= 90 {
+				quality = 30
+			} else if currentFPS >= 60 {
+				quality = 35
 			} else if currentFPS >= 30 {
-				quality = 55
+				quality = 50
 			} else if currentFPS <= 5 {
 				quality = 90
 			}
@@ -538,6 +644,7 @@ func serveHTML(w http.ResponseWriter, r *http.Request) {
             <button id="disconnectBtn" onclick="disconnect()">Disconnect</button>
             <button onclick="toggleFullscreen()">Fullscreen</button>
             <button id="controlBtn" onclick="toggleControl()" class="control-btn">Enable Control</button>
+            <button onclick="syncClipboard()">Sync Clipboard</button>
             <div class="screen-selector">
                 <label>Screen:</label>
                 <button onclick="changeScreen('all')" class="screen-btn active" data-screen="all">All</button>
@@ -562,17 +669,18 @@ func serveHTML(w http.ResponseWriter, r *http.Request) {
             <span id="control-status">Control: Disabled</span>
         </div>
         <div id="screen-container">
-            <img id="screen" alt="VM Desktop" />
+            <canvas id="screen" style="border:2px solid #333; border-radius:8px; cursor:pointer;"></canvas>
         </div>
         <div id="control-indicator" class="control-indicator">REMOTE CONTROL ACTIVE</div>
     </div>
     <script>
+		let manualDisconnect = false;
         let ws = null, currentScreen = 'all', currentFPS = 10, isFullscreen = false, controlEnabled = false;
         let frameCount = 0, lastFrameTime = 0, fpsDisplay = 0;
+        let isMouseDown = false, dragButton = null;
         const screen = document.getElementById('screen'), status = document.getElementById('status');
         const connectBtn = document.getElementById('connectBtn'), disconnectBtn = document.getElementById('disconnectBtn');
-        const controlBtn = document.getElementById('controlBtn');
-        const controlIndicator = document.getElementById('control-indicator');
+        const controlBtn = document.getElementById('controlBtn'), controlIndicator = document.getElementById('control-indicator');
 
         function updateStatus(connected) {
             if (connected) { status.textContent = 'Connected'; status.className = 'connected'; connectBtn.disabled = true; disconnectBtn.disabled = false; }
@@ -580,6 +688,7 @@ func serveHTML(w http.ResponseWriter, r *http.Request) {
         }
 
         function connect() {
+			manualDisconnect = false;
             if (ws && ws.readyState === WebSocket.OPEN) return;
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             ws = new WebSocket(protocol + '//' + window.location.host + '/ws');
@@ -592,10 +701,25 @@ func serveHTML(w http.ResponseWriter, r *http.Request) {
             };
             
             ws.onmessage = function(event) {
-                const blob = new Blob([event.data], {type: 'image/jpeg'});
-                const imageUrl = URL.createObjectURL(blob);
-                if (screen.src.startsWith('blob:')) URL.revokeObjectURL(screen.src);
-                screen.src = imageUrl;
+                if (typeof event.data === 'string') {
+                    try {
+                        const message = JSON.parse(event.data);
+                        if (message.type === 'clipboard' && message.data.action === 'content') {
+                            navigator.clipboard.writeText(message.data.text).catch(err => console.warn('Cannot write to clipboard:', err));
+                        }
+                    } catch (e) {}
+                    return;
+                }
+                
+                const blob = new Blob([event.data], { type: 'image/jpeg' });
+				createImageBitmap(blob).then(bitmap => {
+					const ctx = screen.getContext('2d');
+					if (screen.width !== bitmap.width || screen.height !== bitmap.height) {
+						screen.width = bitmap.width;
+						screen.height = bitmap.height;
+					}
+					ctx.drawImage(bitmap, 0, 0);
+				});
                 
                 const now = Date.now(); frameCount++;
                 if (now - lastFrameTime >= 2000) {
@@ -606,12 +730,22 @@ func serveHTML(w http.ResponseWriter, r *http.Request) {
                 updateImageInfo();
             };
             
-            ws.onclose = function() { updateStatus(false); setTimeout(connect, 2000); };
+            ws.onclose = function() {
+				updateStatus(false);
+				if (!manualDisconnect) {
+					setTimeout(connect, 2000);
+				}
+			};
             ws.onerror = function(error) { console.error('WebSocket error:', error); updateStatus(false); };
         }
 
         function disconnect() {
-            if (ws) { ws.close(); ws = null; }
+            if (ws) {
+				manualDisconnect = true;
+				ws.close();
+				ws = null;
+			}
+			updateStatus(false);
             if (screen.src.startsWith('blob:')) URL.revokeObjectURL(screen.src);
             screen.src = ''; updateStatus(false);
         }
@@ -648,20 +782,30 @@ func serveHTML(w http.ResponseWriter, r *http.Request) {
 
         function toggleControl() {
             controlEnabled = !controlEnabled;
-            
             if (controlEnabled) {
-                controlBtn.textContent = 'Disable Control'; 
-                controlBtn.classList.add('enabled');
-                controlIndicator.style.display = 'block'; 
-                document.getElementById('control-status').textContent = 'Control: Enabled';
-                console.log('Remote control ENABLED');
+                controlBtn.textContent = 'Disable Control'; controlBtn.classList.add('enabled');
+                controlIndicator.style.display = 'block'; document.getElementById('control-status').textContent = 'Control: Enabled';
             } else {
-                controlBtn.textContent = 'Enable Control'; 
-                controlBtn.classList.remove('enabled');
-                controlIndicator.style.display = 'none'; 
-                document.getElementById('control-status').textContent = 'Control: Disabled';
-                console.log('Remote control DISABLED');
+                controlBtn.textContent = 'Enable Control'; controlBtn.classList.remove('enabled');
+                controlIndicator.style.display = 'none'; document.getElementById('control-status').textContent = 'Control: Disabled';
             }
+        }
+
+        function syncClipboard() {
+            if (!controlEnabled || !ws || ws.readyState !== WebSocket.OPEN) return;
+            
+            navigator.clipboard.readText().then(text => {
+                sendControlEvent('clipboard', { action: 'set', text: text });
+                console.log('Clipboard sent to VM');
+                
+                setTimeout(() => {
+                    sendControlEvent('clipboard', { action: 'get' });
+                    console.log('Clipboard requested from VM');
+                }, 100);
+            }).catch(err => {
+                console.warn('Cannot read clipboard:', err);
+                sendControlEvent('clipboard', { action: 'get' });
+            });
         }
 
         function sendControlEvent(type, data) {
@@ -670,75 +814,95 @@ func serveHTML(w http.ResponseWriter, r *http.Request) {
         }
 
         function getImageCoordinates(e) {
-            const rect = screen.getBoundingClientRect();
-            const scaleX = screen.naturalWidth / rect.width;
-            const scaleY = screen.naturalHeight / rect.height;
-            
-            return { 
-                x: Math.round((e.clientX - rect.left) * scaleX), 
-                y: Math.round((e.clientY - rect.top) * scaleY) 
-            };
-        }
+			const rect = screen.getBoundingClientRect();
+			const scaleX = screen.width / rect.width;
+			const scaleY = screen.height / rect.height;
+			return {
+				x: Math.round((e.clientX - rect.left) * scaleX),
+				y: Math.round((e.clientY - rect.top) * scaleY)
+			};
+		}
 
-        function updateImageInfo() {
-            if (screen.naturalWidth && screen.naturalHeight) 
-                document.getElementById('resolution').textContent = 'Resolution: ' + screen.naturalWidth + 'x' + screen.naturalHeight;
-        }
+       	function updateImageInfo() {
+			if (screen.width && screen.height) {
+				document.getElementById('resolution').textContent =
+					'Resolution: ' + screen.width + 'x' + screen.height;
+			}
+		}
 
+        // Événements souris - VERSION CORRIGÉE selon ChatGPT
         screen.addEventListener('mousedown', function(e) {
-            if (!controlEnabled) return; e.preventDefault();
+            if (!controlEnabled) return; 
+            e.preventDefault();
             const coords = getImageCoordinates(e);
-            const button = e.button === 0 ? 'left' : e.button === 2 ? 'right' : 'middle';
-            sendControlEvent('mouse', {x: coords.x, y: coords.y, button: button, action: 'down'});
+            dragButton = e.button === 0 ? 'left' : e.button === 2 ? 'right' : 'middle';
+            isMouseDown = true;
+            sendControlEvent('mouse', {x: coords.x, y: coords.y, button: dragButton, action: 'down'});
         });
 
         screen.addEventListener('mouseup', function(e) {
-            if (!controlEnabled) return; e.preventDefault();
+            if (!controlEnabled) return; 
+            e.preventDefault();
             const coords = getImageCoordinates(e);
             const button = e.button === 0 ? 'left' : e.button === 2 ? 'right' : 'middle';
             sendControlEvent('mouse', {x: coords.x, y: coords.y, button: button, action: 'up'});
+            isMouseDown = false;
+            dragButton = null;
         });
 
-        screen.addEventListener('mousemove', function(e) {
-            if (!controlEnabled) return; 
-            e.preventDefault();
-            
-            if (mouseLocked) {
-                // En mode locked, déplacer le curseur virtuel
-                updateMouseCursor(e.clientX, e.clientY);
-            }
-            
-            const coords = getImageCoordinates(e);
-            sendControlEvent('mouse', {x: coords.x, y: coords.y, button: 'none', action: 'move'});
-        });
+        let lastMouseMove = 0;
+		screen.addEventListener('mousemove', function(e) {
+			if (!controlEnabled) return; 
+			const now = Date.now();
+			if (now - lastMouseMove < 16) return;
+			lastMouseMove = now;
+
+			e.preventDefault();
+			const coords = getImageCoordinates(e);
+			if (isMouseDown && dragButton) {
+				sendControlEvent('mouse', {x: coords.x, y: coords.y, button: dragButton, action: 'drag'});
+			} else {
+				sendControlEvent('mouse', {x: coords.x, y: coords.y, button: 'none', action: 'move'});
+			}
+		});
 
         screen.addEventListener('wheel', function(e) {
-            if (!controlEnabled) return; e.preventDefault();
+            if (!controlEnabled) return; 
+            e.preventDefault();
             const coords = getImageCoordinates(e);
             sendControlEvent('mouse', {x: coords.x, y: coords.y, button: 'wheel', action: 'scroll', scroll: e.deltaY > 0 ? -1 : 1});
         });
 
-        screen.addEventListener('mouseleave', function(e) {
-            if (mouseLocked) {
-                // En mode locked, empêcher la souris de sortir en la ramenant au centre
-                const rect = screen.getBoundingClientRect();
-                const centerX = rect.left + rect.width / 2;
-                const centerY = rect.top + rect.height / 2;
-                
-                // Note: On ne peut pas forcer la position de la souris réelle,
-                // mais on peut ignorer les événements en dehors de l'image
-                e.preventDefault();
-            }
-        });
-
-        screen.addEventListener('mouseenter', function(e) {
-            if (mouseLocked) {
-                updateMouseCursor(e.clientX, e.clientY);
-            }
-        });
-
+        // Événements clavier avec Ctrl+C/Ctrl+V automatique
         document.addEventListener('keydown', function(e) {
-            // Gérer les raccourcis spéciaux d'abord (même en mode contrôle)
+            if (controlEnabled && e.ctrlKey) {
+                if (e.key === 'c' || e.key === 'C') {
+                    sendControlEvent('keyboard', {key: e.key, action: 'down', ctrl: true, alt: false, shift: false});
+                    setTimeout(() => {
+                        sendControlEvent('keyboard', {key: e.key, action: 'up', ctrl: true, alt: false, shift: false});
+                        setTimeout(() => {
+                            sendControlEvent('clipboard', { action: 'get' });
+                        }, 100);
+                    }, 50);
+                    e.preventDefault();
+                    return;
+                } else if (e.key === 'v' || e.key === 'V') {
+                    navigator.clipboard.readText().then(text => {
+                        sendControlEvent('clipboard', { action: 'set', text: text });
+                        setTimeout(() => {
+                            sendControlEvent('keyboard', {key: e.key, action: 'down', ctrl: true, alt: false, shift: false});
+                            setTimeout(() => {
+                                sendControlEvent('keyboard', {key: e.key, action: 'up', ctrl: true, alt: false, shift: false});
+                            }, 50);
+                        }, 100);
+                    }).catch(err => {
+                        console.warn('Cannot read clipboard for paste:', err);
+                    });
+                    e.preventDefault();
+                    return;
+                }
+            }
+            
             if (e.key === 'Escape' && isFullscreen) {
                 toggleFullscreen();
                 return;
@@ -753,7 +917,6 @@ func serveHTML(w http.ResponseWriter, r *http.Request) {
                 return;
             }
             
-            // Si le contrôle est activé, envoyer les touches
             if (controlEnabled && !e.repeat) {
                 e.preventDefault();
                 sendControlEvent('keyboard', {key: e.key, action: 'down', ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey});
@@ -767,7 +930,6 @@ func serveHTML(w http.ResponseWriter, r *http.Request) {
             }
         });
 
-        // Raccourcis navigation (seulement si contrôle désactivé)
         document.addEventListener('keydown', function(e) {
             if (!controlEnabled) {
                 if (e.key === 'Escape' && isFullscreen) toggleFullscreen();
@@ -780,12 +942,16 @@ func serveHTML(w http.ResponseWriter, r *http.Request) {
         });
 
         screen.ondblclick = function(e) { if (!controlEnabled) toggleFullscreen(); };
-        screen.onclick = function(e) { 
-            if (!controlEnabled && !isFullscreen && ws && ws.readyState === WebSocket.OPEN) 
-                ws.send('refresh'); 
-        };
+        screen.onclick = function(e) { if (!controlEnabled && !isFullscreen && ws && ws.readyState === WebSocket.OPEN) ws.send('refresh'); };
         screen.onload = updateImageInfo;
         window.onload = function() { updateStatus(false); connect(); };
+
+        // DÉSACTIVATION DU MENU CONTEXTUEL - selon ChatGPT
+        document.addEventListener('contextmenu', function(e) {
+            if (controlEnabled) {
+                e.preventDefault();
+            }
+        });
     </script>
 </body>
 </html>`
@@ -805,12 +971,18 @@ func main() {
 		fmt.Println("  -> Ou depuis un PowerShell/CMD administrateur")
 	case "linux":
 		fmt.Printf("Linux détecté - %d écran(s)\n", numScreens)
-		fmt.Println("Dépendances pour contrôle : sudo apt install xdotool")
+		fmt.Println("Dépendances pour contrôle : sudo apt install xdotool xclip")
 		if _, err := exec.LookPath("xdotool"); err != nil {
 			fmt.Println("ATTENTION: xdotool non trouvé - le contrôle ne fonctionnera pas")
 			fmt.Println("Installation: sudo apt install xdotool")
 		} else {
 			fmt.Println("xdotool trouvé - contrôle disponible")
+		}
+		if _, err := exec.LookPath("xclip"); err != nil {
+			fmt.Println("ATTENTION: xclip non trouvé - le clipboard ne fonctionnera pas")
+			fmt.Println("Installation: sudo apt install xclip")
+		} else {
+			fmt.Println("xclip trouvé - clipboard disponible")
 		}
 	case "darwin":
 		fmt.Printf("macOS détecté - %d écran(s)\n", numScreens)
