@@ -91,3 +91,82 @@ ATTENTION : Cette version est configurée pour le développement. En production 
 2. Ajouter une authentification
 3. Utiliser HTTPS avec certificats SSL
 4. Configurer un firewall approprié
+
+
+------------------------------
+
+## VM Linux configuration
+
+### 1. Mise à jour système
+```bash
+sudo apt update && sudo apt upgrade -y
+```
+
+### 2. Environnement graphique
+```bash
+# Installer GNOME (si pas déjà fait)
+sudo apt install gnome-core gdm3 -y
+
+# Redémarrer pour activer GDM
+sudo systemctl restart gdm3
+```
+
+### 3. Au login : Choisir "GNOME on Xorg"
+
+1. Cliquer sur l'icône engrenage à côté du bouton de connexion
+3. Sélectionner "GNOME on Xorg" au lieu de "GNOME"
+3. Se connecter normalement
+
+### 4. Dépendances Go et compilation
+
+```bash
+# Go
+sudo apt install golang-go -y
+
+# Compilateur C (requis par kbinani/screenshot)
+sudo apt install gcc libc6-dev -y
+
+# Dépendances X11
+sudo apt install libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxfixes-dev -y
+```
+
+### 5. Outils de contrôle
+```bash
+# xdotool pour contrôle souris/clavier
+sudo apt install xdotool -y
+
+# Outils de capture d'écran (alternatives)
+sudo apt install scrot imagemagick maim -y
+```
+
+### 6. Configuration réseau (si VM)
+```bash
+# Autoriser le port 8080
+sudo ufw allow 8080
+
+# Ou désactiver le firewall temporairement
+sudo ufw disable
+```
+
+### 7. Test de fonctionnement
+```bash
+# Vérifier l'environnement X11
+echo $DISPLAY          # Doit afficher :0
+echo $XDG_SESSION_TYPE  # Doit afficher x11
+
+# Tester les outils
+xdotool getmouselocation
+scrot test.png
+go version
+```
+
+### 8. Lancement de l'application
+
+```bash
+# Dans le dossier du projet
+go mod tidy
+go run main.go
+
+# Accès depuis une autre machine
+http://IP_DE_LA_VM:8080
+```
